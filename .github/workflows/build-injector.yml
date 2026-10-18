@@ -1,0 +1,60 @@
+# Place at: .github/workflows/build-injector.yml
+# Repo root must contain: esp_inject.sh, esp_overlay.cpp, build_overlay.sh, libesp_core.so
+# Run: Actions -> build-injector -> Run workflow (enter the game package id), download the artifact.
+name: build-injector
+
+on:
+  workflow_dispatch:
+    inputs:
+      package:
+        description: "Game package id baked into esp_inject.sh (e.g. com.vendor.game)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate inputs and required files
+        env:
+          PKG: ${{ inputs.package }}
+        run: |
+          set -eu
+          printf '%s' "$PKG" | grep -Eq '^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)+$' \
+            || { echo "invalid package id: $PKG"; exit 1; }
+          for f in esp_inject.sh esp_overlay.cpp build_overlay.sh libesp_core.so; do
+            [ -f "$f" ] || { echo "missing file: $f"; exit 1; }
+          done
+          echo "libesp_core.so sha256: $(sha256sum libesp_core.so | cut -d' ' -f1)"
+          file libesp_core.so
+
+      - name: Build libesp_overlay.so (NDK preinstalled on the runner)
+        run: |
+          set -eu
+          : "${ANDROID_NDK_HOME:?ANDROID_NDK_HOME is not set on this runner}"
+          NDK_HOST=linux-x86_64 sh build_overlay.sh
+          readelf -d libesp_overlay.so | grep NEEDED
+
+      - name: Bake package id into the injector and assemble bundle
+        env:
+          PKG: ${{ inputs.package }}
+        run: |
+          set -eu
+          mkdir -p dist
+          sed "s/^PKG=\"FILL\"/PKG=\"$PKG\"/" esp_inject.sh > dist/esp_inject.sh
+          grep -q "^PKG=\"$PKG\"" dist/esp_inject.sh || { echo "PKG substitution failed"; exit 1; }
+          chmod +x dist/esp_inject.sh
+          cp libesp_core.so libesp_overlay.so libc++_shared.so dist/
+          sh -n dist/esp_inject.sh
+          ls -l dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: esp-injector-bundle
+          path: dist/
+          if-no-files-found: error
